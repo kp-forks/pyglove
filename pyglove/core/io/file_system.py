@@ -19,6 +19,7 @@ import glob as std_glob
 import io
 import os
 import re
+import shutil
 from typing import Any, Literal, Optional, Union
 
 
@@ -134,6 +135,14 @@ class FileSystem(metaclass=abc.ABCMeta):
   def rmdirs(self, path: Union[str, os.PathLike[str]]) -> None:
     """Removes a directory chain based on a path."""
 
+  @abc.abstractmethod
+  def copy(
+      self,
+      oldpath: Union[str, os.PathLike[str]],
+      newpath: Union[str, os.PathLike[str]],
+  ) -> None:
+    """Copies a file to a new path."""
+
 
 def resolve_path(path: Union[str, os.PathLike[str]]) -> str:
   if isinstance(path, str):
@@ -230,6 +239,13 @@ class StdFileSystem(FileSystem):
 
   def rmdirs(self, path: Union[str, os.PathLike[str]]) -> None:
     os.removedirs(path)
+
+  def copy(
+      self,
+      oldpath: Union[str, os.PathLike[str]],
+      newpath: Union[str, os.PathLike[str]],
+  ) -> None:
+    shutil.copy(oldpath, newpath)
 
 
 #
@@ -460,6 +476,37 @@ class MemoryFileSystem(FileSystem):
       return not dir_dict
     _rmdir(self._root, self._internal_path(path))
 
+  def copy(
+      self,
+      oldpath: Union[str, os.PathLike[str]],
+      newpath: Union[str, os.PathLike[str]],
+  ) -> None:
+    old_file = self._locate(oldpath)
+    if old_file is None:
+      raise FileNotFoundError(oldpath)
+    if not isinstance(old_file, MemoryFile):
+      raise IsADirectoryError(oldpath)
+
+    if self.isdir(newpath):
+      _, old_file_name = self._parent_and_name(oldpath)
+      newpath = resolve_path(newpath)
+      newpath = newpath.rstrip('/') + '/' + old_file_name
+
+    # If newpath exists as file, remove it for overwrite.
+    if self.exists(newpath) and not self.isdir(newpath):
+      self.rm(newpath)
+    elif self.isdir(newpath):
+      raise IsADirectoryError(newpath)
+
+    old_pos = old_file.tell()
+    old_file.seek(0)
+    content = old_file.read()
+    old_file.seek(old_pos)
+
+    is_binary = isinstance(old_file._buffer, io.BytesIO)  # pylint: disable=protected-access
+    with self.open(newpath, 'wb' if is_binary else 'w') as f_new:
+      f_new.write(content)
+
 
 class _FileSystemRegistry:
   """File system registry."""
@@ -615,6 +662,32 @@ class FsspecFileSystem(FileSystem):
     fs, path = fsspec.core.url_to_fs(path)
     fs.rm(path, recursive=True)
 
+  def copy(
+      self,
+      oldpath: Union[str, os.PathLike[str]],
+      newpath: Union[str, os.PathLike[str]],
+  ) -> None:
+    assert fsspec is not None, '`fsspec` is not installed.'
+    fs1, old_path_in_fs = fsspec.core.url_to_fs(oldpath)
+    fs2, new_path_in_fs = fsspec.core.url_to_fs(newpath)
+
+    if fs2.isdir(new_path_in_fs):
+      new_path_in_fs = os.path.join(
+          new_path_in_fs, os.path.basename(old_path_in_fs)
+      )
+
+    if fs1.__class__ == fs2.__class__:
+      fs1.copy(old_path_in_fs, new_path_in_fs)
+    else:
+      with fs1.open(old_path_in_fs, 'rb') as f1:
+        with fs2.open(new_path_in_fs, 'wb') as f2:
+          while True:
+            # Reads the file in 16MB chunks.
+            chunk = f1.read(16 * 1024 * 1024)
+            if not chunk:
+              break
+            f2.write(chunk)
+
 
 class _FsspecUriCatcher(FileSystem):
   """File system to catch URI paths and redirect to FsspecFileSystem."""
@@ -684,6 +757,13 @@ class _FsspecUriCatcher(FileSystem):
   def rmdirs(self, path: Union[str, os.PathLike[str]]) -> None:
     self.get_fs(path).rmdirs(path)
 
+  def copy(
+      self,
+      oldpath: Union[str, os.PathLike[str]],
+      newpath: Union[str, os.PathLike[str]],
+  ) -> None:
+    self.get_fs(oldpath).copy(oldpath, newpath)
+
 
 if fsspec is not None:
   fsspec_fs = FsspecFileSystem()
@@ -749,6 +829,14 @@ def rename(
 def rm(path: Union[str, os.PathLike[str]]) -> None:
   """Removes a file."""
   _fs.get(path).rm(path)
+
+
+def copy(
+    oldpath: Union[str, os.PathLike[str]],
+    newpath: Union[str, os.PathLike[str]],
+) -> None:
+  """Copies a file."""
+  _fs.get(oldpath).copy(oldpath, newpath)
 
 
 def path_exists(path: Union[str, os.PathLike[str]]) -> bool:

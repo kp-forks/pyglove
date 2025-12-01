@@ -14,6 +14,7 @@
 
 import os
 import pathlib
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -152,6 +153,30 @@ class StdFileSystemTest(unittest.TestCase):
           os.path.join(tmp_dir, 'non-existent'),
           os.path.join(tmp_dir, 'y')
       )
+
+  def test_copy(self):
+    tmp_dir = tempfile.mkdtemp()
+    fs = file_system.StdFileSystem()
+    foo_txt = os.path.join(tmp_dir, 'foo.txt')
+    bar_txt = os.path.join(tmp_dir, 'bar.txt')
+    sub_dir = os.path.join(tmp_dir, 'sub')
+    sub_foo_txt = os.path.join(sub_dir, 'foo.txt')
+
+    with fs.open(foo_txt, 'w') as f:
+      f.write('hello')
+    fs.copy(foo_txt, bar_txt)
+    with fs.open(bar_txt) as f:
+      self.assertEqual(f.read(), 'hello')
+    fs.mkdir(sub_dir)
+    fs.copy(foo_txt, sub_dir)
+    with fs.open(sub_foo_txt) as f:
+      self.assertEqual(f.read(), 'hello')
+    with fs.open(foo_txt, 'w') as f:
+      f.write('overwrite')
+    fs.copy(foo_txt, bar_txt)
+    with fs.open(bar_txt) as f:
+      self.assertEqual(f.read(), 'overwrite')
+    shutil.rmtree(tmp_dir)
 
 
 class MemoryFileSystemTest(unittest.TestCase):
@@ -339,6 +364,31 @@ class MemoryFileSystemTest(unittest.TestCase):
     with self.assertRaises(FileNotFoundError):
       fs.rename('/mem/non-existent', '/mem/y')
 
+  def test_copy(self):
+    fs = file_system.MemoryFileSystem()
+    fs.mkdirs('/mem/a')
+    with fs.open('/mem/a/foo.txt', 'w') as f:
+      f.write('hello')
+    fs.copy('/mem/a/foo.txt', '/mem/a/bar.txt')
+    self.assertEqual(fs.open('/mem/a/bar.txt').read(), 'hello')
+    fs.mkdir('/mem/b')
+    fs.copy('/mem/a/foo.txt', '/mem/b')
+    self.assertEqual(fs.open('/mem/b/foo.txt').read(), 'hello')
+    with fs.open('/mem/a/foo.txt', 'w') as f:
+      f.write('overwrite')
+    fs.copy('/mem/a/foo.txt', '/mem/a/bar.txt')
+    self.assertEqual(fs.open('/mem/a/bar.txt').read(), 'overwrite')
+
+    # Test exceptions
+    with self.assertRaises(FileNotFoundError):
+      fs.copy('/mem/non-existent', '/mem/y')
+    with self.assertRaisesRegex(IsADirectoryError, '/mem/a'):
+      fs.copy('/mem/a', '/mem/y')
+
+    fs.mkdirs('/mem/c/foo.txt')
+    with self.assertRaisesRegex(IsADirectoryError, '/mem/c/foo.txt'):
+      fs.copy('/mem/a/foo.txt', '/mem/c')
+
 
 class FileIoApiTest(unittest.TestCase):
 
@@ -433,10 +483,12 @@ class FsspecFileSystemTest(unittest.TestCase):
     self.fs.pipe('memory:///a/b/c', b'abc')
     self.fs.pipe('memory:///a/b/d', b'abd')
     self.fs.mkdir('memory:///a/e')
+    self.tmp_dir = tempfile.mkdtemp()
 
   def tearDown(self):
     super().tearDown()
     fsspec.filesystem('memory').rm('/', recursive=True)
+    shutil.rmtree(self.tmp_dir)
 
   def test_read_file(self):
     self.assertEqual(file_system.readfile('memory:///a/b/c', mode='rb'), b'abc')
@@ -513,6 +565,24 @@ class FsspecFileSystemTest(unittest.TestCase):
     file_system.rmdirs('memory:///x')
     self.assertFalse(file_system.path_exists('memory:///x'))
 
+  def test_copy(self):
+    # same FS copy
+    file_system.copy('memory:///a/b/c', 'memory:///a/f')
+    self.assertEqual(file_system.readfile('memory:///a/f', mode='rb'), b'abc')
+
+    # same FS copy to dir
+    file_system.copy('memory:///a/b/d', 'memory:///a/e')
+    self.assertEqual(file_system.readfile('memory:///a/e/d', mode='rb'), b'abd')
+
+    # cross FS copy: memory to local
+    local_path = os.path.join(self.tmp_dir, 'test.txt')
+    file_system.copy('memory:///a/b/c', f'file://{local_path}')
+    self.assertEqual(file_system.readfile(local_path, mode='rb'), b'abc')
+
+    # cross FS copy: local to memory
+    file_system.copy(f'file://{local_path}', 'memory:///a/g')
+    self.assertEqual(file_system.readfile('memory:///a/g', mode='rb'), b'abc')
+
   def test_fsspec_uri_catcher(self):
     with mock.patch.object(
         file_system.FsspecFileSystem, 'exists', return_value=True
@@ -536,6 +606,14 @@ class FsspecFileSystemTest(unittest.TestCase):
     ) as mock_fsspec_rename:
       file_system.rename('some-proto://foo', 'some-proto://bar')
       mock_fsspec_rename.assert_called_once_with(
+          'some-proto://foo', 'some-proto://bar'
+      )
+
+    with mock.patch.object(
+        file_system.FsspecFileSystem, 'copy', return_value=None
+    ) as mock_fsspec_copy:
+      file_system.copy('some-proto://foo', 'some-proto://bar')
+      mock_fsspec_copy.assert_called_once_with(
           'some-proto://foo', 'some-proto://bar'
       )
 
