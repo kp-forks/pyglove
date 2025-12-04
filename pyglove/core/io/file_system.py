@@ -14,6 +14,7 @@
 """Pluggable file system."""
 
 import abc
+import datetime
 import fnmatch
 import glob as std_glob
 import io
@@ -99,6 +100,14 @@ class FileSystem(metaclass=abc.ABCMeta):
   @abc.abstractmethod
   def isdir(self, path: Union[str, os.PathLike[str]]) -> bool:
     """Returns True if a path is a directory."""
+
+  @abc.abstractmethod
+  def getctime(self, path: Union[str, os.PathLike[str]]) -> float:
+    """Returns the creation time of a file."""
+
+  @abc.abstractmethod
+  def getmtime(self, path: Union[str, os.PathLike[str]]) -> float:
+    """Returns the last modification time of a file."""
 
   @abc.abstractmethod
   def mkdir(
@@ -211,6 +220,12 @@ class StdFileSystem(FileSystem):
   def isdir(self, path: Union[str, os.PathLike[str]]) -> bool:
     return os.path.isdir(path)
 
+  def getctime(self, path: Union[str, os.PathLike[str]]) -> float:
+    return os.path.getctime(path)
+
+  def getmtime(self, path: Union[str, os.PathLike[str]]) -> float:
+    return os.path.getmtime(path)
+
   def mkdir(
       self, path: Union[str, os.PathLike[str]], mode: int = 0o777
   ) -> None:
@@ -260,6 +275,9 @@ class MemoryFile(File):
     super().__init__()
     self._buffer = buffer
     self._pos = 0
+    now = datetime.datetime.now().timestamp()
+    self.ctime = now
+    self.mtime = now
 
   def read(self, size: Optional[int] = None) -> Union[str, bytes]:
     return self._buffer.read(size)
@@ -269,6 +287,7 @@ class MemoryFile(File):
 
   def write(self, content: Union[str, bytes]) -> None:
     self._buffer.write(content)
+    self.mtime = datetime.datetime.now().timestamp()
 
   def seek(self, offset: int, whence: Literal[0, 1, 2] = 0) -> int:
     return self._buffer.seek(offset, whence)
@@ -351,6 +370,24 @@ class MemoryFileSystem(FileSystem):
 
   def isdir(self, path: Union[str, os.PathLike[str]]) -> bool:
     return isinstance(self._locate(path), dict)
+
+  def getctime(self, path: Union[str, os.PathLike[str]]) -> float:
+    """Returns the creation time of a file."""
+    f = self._locate(path)
+    if isinstance(f, dict):
+      raise IsADirectoryError(path)
+    if f is None:
+      raise FileNotFoundError(path)
+    return f.ctime
+
+  def getmtime(self, path: Union[str, os.PathLike[str]]) -> float:
+    """Returns the last modification time of a file."""
+    f = self._locate(path)
+    if isinstance(f, dict):
+      raise IsADirectoryError(path)
+    if f is None:
+      raise FileNotFoundError(path)
+    return f.mtime
 
   def _parent_and_name(
       self, path: Union[str, os.PathLike[str]]
@@ -614,6 +651,22 @@ class FsspecFileSystem(FileSystem):
     fs, path = fsspec.core.url_to_fs(path)
     return fs.isdir(path)
 
+  def getctime(self, path: Union[str, os.PathLike[str]]) -> float:
+    assert fsspec is not None, '`fsspec` is not installed.'
+    fs, path_in_fs = fsspec.core.url_to_fs(path)
+    created = fs.created(path_in_fs)
+    if created is None:
+      raise OSError(f'c-time is not available for path {path!r}')
+    return created.timestamp()
+
+  def getmtime(self, path: Union[str, os.PathLike[str]]) -> float:
+    assert fsspec is not None, '`fsspec` is not installed.'
+    fs, path_in_fs = fsspec.core.url_to_fs(path)
+    modified = fs.modified(path_in_fs)
+    if modified is None:
+      raise OSError(f'm-time is not available for path {path!r}')
+    return modified.timestamp()
+
   def mkdir(
       self,
       path: Union[str, os.PathLike[str]], mode: int = 0o777
@@ -725,6 +778,12 @@ class _FsspecUriCatcher(FileSystem):
 
   def isdir(self, path: Union[str, os.PathLike[str]]) -> bool:
     return self.get_fs(path).isdir(path)
+
+  def getctime(self, path: Union[str, os.PathLike[str]]) -> float:
+    return self.get_fs(path).getctime(path)
+
+  def getmtime(self, path: Union[str, os.PathLike[str]]) -> float:
+    return self.get_fs(path).getmtime(path)
 
   def mkdir(
       self,
@@ -862,6 +921,16 @@ def listdir(
 def isdir(path: Union[str, os.PathLike[str]]) -> bool:
   """Returns True if path is a directory."""
   return _fs.get(path).isdir(path)
+
+
+def getctime(path: Union[str, os.PathLike[str]]) -> float:
+  """Returns the creation time of a file."""
+  return _fs.get(path).getctime(path)
+
+
+def getmtime(path: Union[str, os.PathLike[str]]) -> float:
+  """Returns the last modification time of a file."""
+  return _fs.get(path).getmtime(path)
 
 
 def mkdir(path: Union[str, os.PathLike[str]], mode: int = 0o777) -> None:

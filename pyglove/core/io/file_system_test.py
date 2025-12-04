@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import os
 import pathlib
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 import fsspec
@@ -176,6 +178,18 @@ class StdFileSystemTest(unittest.TestCase):
     fs.copy(foo_txt, bar_txt)
     with fs.open(bar_txt) as f:
       self.assertEqual(f.read(), 'overwrite')
+    shutil.rmtree(tmp_dir)
+
+  def test_getctime_getmtime(self):
+    tmp_dir = tempfile.mkdtemp()
+    fs = file_system.StdFileSystem()
+    file1 = os.path.join(tmp_dir, 'file1')
+    with fs.open(file1, 'w') as f:
+      f.write('hello')
+    ctime = fs.getctime(file1)
+    mtime = fs.getmtime(file1)
+    self.assertLess(0, ctime)
+    self.assertLessEqual(ctime, mtime)
     shutil.rmtree(tmp_dir)
 
 
@@ -389,6 +403,32 @@ class MemoryFileSystemTest(unittest.TestCase):
     with self.assertRaisesRegex(IsADirectoryError, '/mem/c/foo.txt'):
       fs.copy('/mem/a/foo.txt', '/mem/c')
 
+  def test_getctime_getmtime(self):
+    fs = file_system.MemoryFileSystem()
+    fs.mkdirs('/mem/a')
+    file1 = '/mem/file1_times'
+    with fs.open(file1, 'w') as f:
+      f.write('hello')
+    ctime = fs.getctime(file1)
+    mtime = fs.getmtime(file1)
+    self.assertLess(0, ctime)
+    self.assertLess(ctime, mtime)
+    time.sleep(0.01)
+    with fs.open(file1, 'w') as f:
+      f.write('world')
+    self.assertEqual(fs.getctime(file1), ctime)
+    self.assertLess(mtime, fs.getmtime(file1))
+
+    with self.assertRaises(IsADirectoryError):
+      fs.getctime('/mem/a')
+    with self.assertRaises(FileNotFoundError):
+      fs.getctime('/mem/non_existent')
+
+    with self.assertRaises(IsADirectoryError):
+      fs.getmtime('/mem/a')
+    with self.assertRaises(FileNotFoundError):
+      fs.getmtime('/mem/non_existent')
+
 
 class FileIoApiTest(unittest.TestCase):
 
@@ -473,6 +513,19 @@ class FileIoApiTest(unittest.TestCase):
     self.assertEqual(
         sorted(file_system.glob('/mem/g/a/*')),
         ['/mem/g/a/b', '/mem/g/a/b/bar.txt', '/mem/g/a/foo2.txt'])
+
+  def test_getctime_getmtime(self):
+    # Test with standard file system.
+    std_file = os.path.join(tempfile.mkdtemp(), 'file_ctime_mtime')
+    file_system.writefile(std_file, 'foo')
+    self.assertLess(0, file_system.getctime(std_file))
+    self.assertLess(0, file_system.getmtime(std_file))
+
+    # Test with memory file system.
+    mem_file = '/mem/file_ctime_mtime'
+    file_system.writefile(mem_file, 'foo')
+    self.assertLess(0, file_system.getctime(mem_file))
+    self.assertLess(0, file_system.getmtime(mem_file))
 
 
 class FsspecFileSystemTest(unittest.TestCase):
@@ -582,6 +635,26 @@ class FsspecFileSystemTest(unittest.TestCase):
     # cross FS copy: local to memory
     file_system.copy(f'file://{local_path}', 'memory:///a/g')
     self.assertEqual(file_system.readfile('memory:///a/g', mode='rb'), b'abc')
+
+  def test_getctime_getmtime(self):
+    self.fs.touch('memory:///a/b/c_time')
+    now = datetime.datetime.now()
+    with mock.patch.object(self.fs, 'created', return_value=now):
+      self.assertEqual(
+          file_system.getctime('memory:///a/b/c_time'), now.timestamp()
+      )
+    with mock.patch.object(self.fs, 'modified', return_value=now):
+      self.assertEqual(
+          file_system.getmtime('memory:///a/b/c_time'), now.timestamp()
+      )
+
+    with mock.patch.object(self.fs, 'created', return_value=None):
+      with self.assertRaisesRegex(OSError, 'c-time is not available'):
+        file_system.getctime('memory:///a/b/c_time')
+
+    with mock.patch.object(self.fs, 'modified', return_value=None):
+      with self.assertRaisesRegex(OSError, 'm-time is not available'):
+        file_system.getmtime('memory:///a/b/c_time')
 
   def test_fsspec_uri_catcher(self):
     with mock.patch.object(
